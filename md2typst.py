@@ -56,7 +56,7 @@ TOKENS_MAP = {
     r'\rightharpoonup': 'harpoon.rt', r'\rightharpoondown': 'harpoon.rb',
     r'\leftharpoonup': 'harpoon.lt', r'\leftharpoondown': 'harpoon.lb',
     r'\rightleftharpoons': 'harpoons.rtlb', r'\leftrightharpoons': 'harpoons.ltrb',
-    r'\iff': 'arrow.l.r.double.long', r'\implies': '=>', r'\impliedby': '<=',
+    r'\iff': 'arrow.l.r.double.long',
     # 关系运算符
     r'\neq': 'eq.not', r'\ne': 'eq.not',
     r'\equiv': 'eq.triple', r'\approx': 'approx',
@@ -205,28 +205,47 @@ def tokenize(s):
         pos = m.end()
     return tokens
 
+# Punctuation that carries structural meaning inside Typst mat()/cases()/etc.
+# and must be replaced with explicit symbol names to avoid ambiguity.
+PUNCT_ESCAPE = {
+    ',': 'comma',
+    '.': 'dot.basic',
+    ';': 'semi',
+    ':': 'colon',
+    '!': 'excl',
+    '?': 'quest',
+}
+# Environments where the above substitution applies.
+STRUCTURED_ENVS = {
+    'pmatrix', 'bmatrix', 'vmatrix', 'Vmatrix', 'matrix', 'array', 'cases',
+}
+
 # -- AST to Typst String --
 
-def _compact(node, env=None):
+def _compact(node, env=None):  # env param kept for call-site compat, always shadowed to None
     """Render a node with children joined WITHOUT spaces.
     Used for \\text{...} and \\operatorname{...} whose content is
-    split into individual letter tokens by the tokenizer."""
+    split into individual letter tokens by the tokenizer.
+    env is intentionally NOT forwarded so that punctuation inside quoted
+    text is never replaced by PUNCT_ESCAPE (e.g. \\text{a,b} stays a,b)."""
     if type(node) in (Group, Expr):
-        return ''.join(filter(None, (_compact(c, env) for c in node.children)))
-    return to_typst(node, env)
+        return ''.join(filter(None, (_compact(c, None) for c in node.children)))
+    return to_typst(node, None)
 
 def to_typst(node, current_env=None):
     if type(node) is Expr:
         parts = [to_typst(c, current_env) for c in node.children]
         s = ' '.join(p for p in parts if p)
-        s = s.replace(' ,', ',').replace(' .', '.').replace(' !', '!')
-        
+        # Only collapse spacing around punctuation in plain math;
+        # inside structured envs the punctuation has already been
+        # replaced by PUNCT_ESCAPE names so these subs are wrong.
+        if current_env not in STRUCTURED_ENVS:
+            s = s.replace(' ,', ',').replace(' .', '.').replace(' !', '!')
         if current_env in ('pmatrix', 'bmatrix', 'vmatrix', 'Vmatrix', 'matrix', 'array'):
             s = s.replace(' & ', ', ').replace('&', ',')
             s = s.replace(' \\ ', '; ')
         elif current_env == 'cases':
             s = s.replace(' \\ ', ', ')
-            s = s.replace(',  ', ', ')
         elif current_env in ('aligned', 'align', 'gather', 'split', 'aligned*', 'align*', 'equation', 'equation*'):
             s = s.replace(' \\ ', ' \\\n')
         return s
@@ -234,12 +253,16 @@ def to_typst(node, current_env=None):
         if node.text.startswith('%'): return '// ' + node.text[1:]
         if node.text == r'\.': return ''
         if node.text in SYMS_MAP: return SYMS_MAP[node.text]
+        if current_env in STRUCTURED_ENVS and node.text in PUNCT_ESCAPE:
+            return PUNCT_ESCAPE[node.text]
         return node.text
     elif type(node) is tuple:
         typ, val = node
         if typ == 'CMD':
             if val in TOKENS_MAP: return TOKENS_MAP[val]
             if val in GREEK: return GREEK[val]
+        if current_env in STRUCTURED_ENVS and val in PUNCT_ESCAPE:
+            return PUNCT_ESCAPE[val]
         return val
     elif type(node) is Group:
         return ' '.join(filter(None, [to_typst(c, current_env) for c in node.children]))
