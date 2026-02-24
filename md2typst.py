@@ -56,7 +56,7 @@ TOKENS_MAP = {
     r'\rightharpoonup': 'harpoon.rt', r'\rightharpoondown': 'harpoon.rb',
     r'\leftharpoonup': 'harpoon.lt', r'\leftharpoondown': 'harpoon.lb',
     r'\rightleftharpoons': 'harpoons.rtlb', r'\leftrightharpoons': 'harpoons.ltrb',
-    r'\iff': 'arrow.l.r.double.long',
+    r'\iff': 'arrow.l.r.double.long', r'\implies': '=>', r'\impliedby': '<=',
     # 关系运算符
     r'\neq': 'eq.not', r'\ne': 'eq.not',
     r'\equiv': 'eq.triple', r'\approx': 'approx',
@@ -207,6 +207,14 @@ def tokenize(s):
 
 # -- AST to Typst String --
 
+def _compact(node, env=None):
+    """Render a node with children joined WITHOUT spaces.
+    Used for \\text{...} and \\operatorname{...} whose content is
+    split into individual letter tokens by the tokenizer."""
+    if type(node) in (Group, Expr):
+        return ''.join(filter(None, (_compact(c, env) for c in node.children)))
+    return to_typst(node, env)
+
 def to_typst(node, current_env=None):
     if type(node) is Expr:
         parts = [to_typst(c, current_env) for c in node.children]
@@ -260,8 +268,8 @@ def to_typst(node, current_env=None):
         elif node.name in ACCENTS: return f"{ACCENTS[node.name]}({to_typst(node.args[0], current_env)})"
         elif node.name in FONTS: return f"{FONTS[node.name]}({to_typst(node.args[0], current_env)})"
         elif node.name == r'\boxed': return f"rect({to_typst(node.args[0], current_env)})"
-        elif node.name == r'\operatorname': return f'op("{to_typst(node.args[0], current_env)}")'
-        elif node.name == r'\text': return f'"{to_typst(node.args[0], current_env)}"'
+        elif node.name == r'\operatorname': return f'op("{_compact(node.args[0], current_env)}")'
+        elif node.name == r'\text': return f'"{_compact(node.args[0], current_env)}"'
         elif node.name == r'\abs': return f"abs({to_typst(node.args[0], current_env)})"
         elif node.name == r'\norm': return f"norm({to_typst(node.args[0], current_env)})"
         elif node.name == r'\lr':
@@ -457,12 +465,26 @@ def convert_text_line(line):
         if seg.startswith('`') and seg.endswith('`'):
             result.append(seg)
             continue
-        parts = re.split(r'(?<!\\)(\$\$(?:[^$\\]|\\.)+?\$\$|\$(?:[^$\\]|\\.)+?\$)', seg)
+        # Also capture \[...\] (display) and \(...\) (inline) delimiters.
+        # The $ patterns are unchanged; the new alternatives are appended.
+        _MATH_RE = re.compile(
+            r'(?<!\\)('
+            r'\$\$(?:[^$\\]|\\.)+?\$\$'
+            r'|\$(?:[^$\\]|\\.)+?\$'
+            r'|\\\[[\s\S]+?\\\]'
+            r'|\\\([\s\S]+?\\\)'
+            r')'
+        )
+        parts = _MATH_RE.split(seg)
         for part in parts:
-            if part.startswith('$') and part.endswith('$') and len(part) > 1:
-                is_disp = part.startswith('$$') and part.endswith('$$')
-                inner = part[2:-2] if is_disp else part[1:-1]
-                result.append(convert_math(inner, is_display=is_disp))
+            if part.startswith('$$') and part.endswith('$$') and len(part) >= 5:
+                result.append(convert_math(part[2:-2], is_display=True))
+            elif part.startswith('$') and part.endswith('$') and len(part) >= 3:
+                result.append(convert_math(part[1:-1], is_display=False))
+            elif part.startswith(r'\[') and part.endswith(r'\]'):
+                result.append(convert_math(part[2:-2], is_display=True))
+            elif part.startswith(r'\(') and part.endswith(r'\)'):
+                result.append(convert_math(part[2:-2], is_display=False))
             else:
                 p = _conv_list(part)
                 p = _conv_markup(p)
@@ -499,6 +521,25 @@ def convert_document(text):
                 math_lines.append(lines[i]); i += 1
             if i < len(lines):
                 ep = lines[i].find('$$'); math_lines.append(lines[i][:ep])
+            out.append(convert_math('\n'.join(math_lines), is_display=True)); i += 1; continue
+        # \[...\] display math – three forms mirroring the $$ cases above
+        # Form 1: lone \[ on its own line, collect until lone \]
+        if stripped == r'\[':
+            math_lines = []; i += 1
+            while i < len(lines) and lines[i].strip() != r'\]':
+                math_lines.append(lines[i]); i += 1
+            out.append(convert_math('\n'.join(math_lines), is_display=True)); i += 1; continue
+        # Form 2: \[...\] all on one line
+        m = re.match(r'^\s*\\\[(.*?)\\\]\s*$', line, re.DOTALL)
+        if m and m.group(1).strip():
+            out.append(convert_math(m.group(1), is_display=True)); i += 1; continue
+        # Form 3: \[ starts the line but \] has not appeared yet → collect until \]
+        if stripped.startswith(r'\[') and r'\]' not in stripped:
+            math_lines = [stripped[2:]]; i += 1
+            while i < len(lines) and r'\]' not in lines[i]:
+                math_lines.append(lines[i]); i += 1
+            if i < len(lines):
+                ep = lines[i].find(r'\]'); math_lines.append(lines[i][:ep])
             out.append(convert_math('\n'.join(math_lines), is_display=True)); i += 1; continue
         if not stripped:
             out.append(''); i += 1; continue
